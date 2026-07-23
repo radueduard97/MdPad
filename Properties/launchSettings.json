@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "MdPad (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "MdPad (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}
