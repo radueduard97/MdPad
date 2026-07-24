@@ -38,6 +38,7 @@ MdPad is free and open source under the [MIT license](LICENSE).
 - Heading outline sidebar — click to jump the preview and the caret
 - A formatting toolbar whose tooltips show both the Markdown and the shortcut
 - Tables, task lists, blockquotes, fenced code, strikethrough, autolinks (Markdig's advanced extensions)
+- **Inline HTML** — the centred header, badge row, `<kbd>`, `<br>` and `<table>` that READMEs are built from render as native controls too
 
 **As a skill workbench**
 
@@ -89,6 +90,19 @@ The installer is per-user and needs **no administrator rights**. It installs to 
 
 **Uninstall** — Settings → Apps → MdPad, or run `%LOCALAPPDATA%\Programs\MdPad\Uninstall-MdPad.ps1`. It removes the files, shortcuts, and registry entries, and only clears the `.md` association if it still points at MdPad.
 
+### MSIX package
+
+Prefer a packaged install? Grab `MdPad-1.0.0-win-x64-msix.zip` from Releases, unzip, and run `Install-Msix.ps1`. The package is self-contained and per-user; uninstall from Settings → Apps like any Store app.
+
+Because the package is signed with a self-signed developer certificate, its certificate has to be trusted before Windows will install it. `Install-Msix.ps1` does this for you: it imports the bundled `MdPad.cer` into the machine's *Trusted People* store (self-elevating for that one step), then installs the `.msix`. Once trusted, you can also just double-click the `.msix`.
+
+```powershell
+.\Install-Msix.ps1              # trust the cert, then install
+.\Install-Msix.ps1 -Uninstall   # remove MdPad
+```
+
+> Shipping under your own code-signing certificate removes the trust step entirely — a package signed by a publicly-trusted cert installs by double-click. See *Build from source* below.
+
 ### Open with
 
 MdPad registers for `.md`, `.markdown`, `.mdown`, and `.mkd`, and deliberately **does not steal the default handler** — it appears as a choice:
@@ -122,7 +136,13 @@ dotnet run                                     # build and launch
 .\tools\New-AppIcon.ps1                        # regenerate the icon and logo assets
 .\installer\Build-Installer.ps1                # publish + package the installer zip
 .\installer\Build-Installer.ps1 -Runtime win-arm64
+
+.\installer\Build-Msix.ps1                     # build + sign an MSIX package
+.\installer\Build-Msix.ps1 -Runtime win-arm64
+.\installer\Build-Msix.ps1 -CertificatePath cert.pfx -CertificatePassword (Read-Host -AsSecureString)
 ```
+
+`Build-Msix.ps1` drives the Windows App SDK single-project MSIX tooling through `dotnet build` (no Visual Studio needed — `signtool.exe` comes from the `Microsoft.Windows.SDK.BuildTools` NuGet package). With no `-CertificatePath`, it creates and reuses a self-signed certificate whose subject matches the manifest's `Publisher`, signs the package, and exports `MdPad.cer` for `Install-Msix.ps1` to trust. Pass `-CertificatePath` to sign with a real code-signing certificate instead.
 
 ## Project layout
 
@@ -133,14 +153,17 @@ dotnet run                                     # build and launch
 | `MainPage.xaml.cs` | Tabs, file commands, Markdown text transforms, budget and reference wiring |
 | `MdDocument.cs` | One open document — text, saved baseline, dirty state, caret, scroll |
 | `MarkdownRenderer.cs` | Markdig AST → WinUI control tree; front matter card; local-link resolution |
+| `MarkdownRenderer.Html.cs` | The HTML half of the renderer: block and inline HTML, images, SVG |
+| `HtmlParser.cs` | A small forgiving HTML tokenizer — tags, attributes, entities, implied closes |
 | `SkillAnalysis.cs` | Token estimates, context tiers, reference/orphan discovery, YAML front matter |
-| `installer/` | Build, install, and uninstall scripts |
+| `installer/` | Build, install, and uninstall scripts (zip + MSIX) |
 | `tools/New-AppIcon.ps1` | Draws the app mark and packs the multi-resolution `.ico` |
 
 ## Design decisions
 
 - **Native controls over HTML.** A WebView2 preview means shipping a browser, waiting for it to start, and fighting CSS to match the system theme. Rendering to `TextBlock`/`Grid`/`Border` gives instant startup, real text selection, and automatic theme, accent, and Mica integration.
 - **Mica for chrome, opaque for content.** The outline sidebar, menu line, and status bar sit on the window's Mica backdrop; the editor and preview live on an opaque rounded card that casts a shadow over it.
+- **HTML rendered, not embedded.** Inline HTML goes through a small hand-written parser and lands on the same `TextBlock`/`Grid`/`Border` vocabulary as Markdown, so a centred `<h1>` still joins the outline and a `<table>` still scrolls like a Markdown one. Bringing in a browser to render six tags would undo the point of the app.
 - **One editor, many documents.** Tabs swap the document behind a single editor and preview rather than duplicating the UI tree per tab.
 - **Estimates over exactness.** Token counts use a character heuristic instead of a model-specific tokeniser — no dependency, no network, and accurate enough to catch a bloated `description`.
 
@@ -155,7 +178,8 @@ dotnet run                                     # build and launch
 
 - Anchor links (`#section`) are inert — they don't scroll the preview yet
 - Orphan detection only considers `.md` files, so scripts and assets aren't flagged
-- Inline HTML in Markdown is skipped rather than rendered
+- Inline HTML covers the tags READMEs use, not the whole language: `<script>` and `<style>` are dropped, `<details>` renders expanded, and CSS in a `style` attribute is ignored apart from `text-align`
+- SVG images draw through WinUI's SVG support, which does not render `<text>` elements — shields.io badges show their colours but not their labels
 - Self-contained builds are large on disk (~268 MB installed, ~102 MB zipped)
 - Single window; opening a second file from Explorer starts a second process
 

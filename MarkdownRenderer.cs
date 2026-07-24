@@ -39,7 +39,7 @@ public sealed record OutlineEntry(int Level, string Text, int Line, FrameworkEle
 /// One top-level Markdown block becomes one FrameworkElement in the host panel;
 /// inline formatting is rendered with XAML <see cref="Inline"/> runs.
 /// </summary>
-public static class MarkdownRenderer
+public static partial class MarkdownRenderer
 {
     internal static readonly MarkdownPipeline Pipeline = new MarkdownPipelineBuilder()
         .UseAdvancedExtensions()
@@ -117,7 +117,7 @@ public static class MarkdownRenderer
                 host.Add(BuildTable(table, outline));
                 break;
             case HtmlBlock html:
-                host.Add(BuildRawText(html.Lines.ToString()));
+                RenderHtmlBlock(html.Lines.ToString(), html.Line, host, outline);
                 break;
             default:
                 // Unknown container blocks: recurse into children so nothing is lost.
@@ -132,45 +132,65 @@ public static class MarkdownRenderer
         }
     }
 
+    /// <summary>Font size for a heading level, shared by Markdown and HTML headings.</summary>
+    private static double HeadingFontSize(int level) => level switch
+    {
+        1 => 30,
+        2 => 24,
+        3 => 20,
+        4 => 17,
+        5 => 15,
+        _ => 13,
+    };
+
     private static FrameworkElement BuildHeading(HeadingBlock heading)
     {
-        double size = heading.Level switch
+        RichTextBlock tb = HeadingSurface(heading.Level, TextAlignment.Left, out Paragraph line);
+        if (heading.Inline is not null)
         {
-            1 => 30,
-            2 => 24,
-            3 => 20,
-            4 => 17,
-            5 => 15,
-            _ => 13,
-        };
+            RenderInlines(heading.Inline, line.Inlines);
+        }
+        return WithHeadingRule(tb, heading.Level);
+    }
 
-        var tb = new TextBlock
+    /// <summary>
+    /// The text surface for a heading of <paramref name="level"/>. A RichTextBlock rather
+    /// than a TextBlock because a heading may contain an image, and only RichTextBlock
+    /// accepts an InlineUIContainer.
+    /// </summary>
+    private static RichTextBlock HeadingSurface(int level, TextAlignment align, out Paragraph paragraph)
+    {
+        var tb = new RichTextBlock
         {
             TextWrapping = TextWrapping.Wrap,
             IsTextSelectionEnabled = true,
-            FontSize = size,
+            FontSize = HeadingFontSize(level),
             FontWeight = FontWeights.SemiBold,
-            Margin = new Thickness(0, heading.Level <= 2 ? 16 : 12, 0, 6),
+            TextAlignment = align,
+            Margin = new Thickness(0, level <= 2 ? 16 : 12, 0, 6),
         };
-        if (heading.Inline is not null)
+        paragraph = new Paragraph();
+        tb.Blocks.Add(paragraph);
+        return tb;
+    }
+
+    /// <summary>Underline a level 1-2 heading with a subtle divider, GitHub-style.</summary>
+    private static FrameworkElement WithHeadingRule(FrameworkElement heading, int level)
+    {
+        if (level > 2)
         {
-            RenderInlines(heading.Inline, tb.Inlines);
+            return heading;
         }
 
-        if (heading.Level <= 2)
+        var panel = new StackPanel { Spacing = 4 };
+        panel.Children.Add(heading);
+        panel.Children.Add(new Border
         {
-            // Underline larger headings with a subtle divider, GitHub-style.
-            var panel = new StackPanel { Spacing = 4 };
-            panel.Children.Add(tb);
-            panel.Children.Add(new Border
-            {
-                Height = 1,
-                Background = Brush("DividerStrokeColorDefaultBrush", Color.FromArgb(40, 128, 128, 128)),
-                Margin = new Thickness(0, 0, 0, 4),
-            });
-            return panel;
-        }
-        return tb;
+            Height = 1,
+            Background = Brush("DividerStrokeColorDefaultBrush", Color.FromArgb(40, 128, 128, 128)),
+            Margin = new Thickness(0, 0, 0, 4),
+        });
+        return panel;
     }
 
     private static FrameworkElement BuildParagraph(ParagraphBlock paragraph)
@@ -268,9 +288,11 @@ public static class MarkdownRenderer
         return border;
     }
 
-    private static FrameworkElement BuildCodeBlock(CodeBlock code)
+    private static FrameworkElement BuildCodeBlock(CodeBlock code) => BuildCodeSurface(code.Lines.ToString());
+
+    /// <summary>The bordered, scrollable monospace surface used by fenced code and &lt;pre&gt;.</summary>
+    private static FrameworkElement BuildCodeSurface(string text)
     {
-        string text = code.Lines.ToString();
         var tb = new TextBlock
         {
             Text = text,
@@ -412,17 +434,6 @@ public static class MarkdownRenderer
         Margin = new Thickness(0, 8, 0, 14),
     };
 
-    private static FrameworkElement BuildRawText(string text) => new TextBlock
-    {
-        Text = text,
-        FontFamily = MonoFont,
-        FontSize = 12,
-        IsTextSelectionEnabled = true,
-        TextWrapping = TextWrapping.Wrap,
-        Foreground = Brush("TextFillColorSecondaryBrush", Color.FromArgb(255, 120, 120, 120)),
-        Margin = new Thickness(0, 0, 0, 10),
-    };
-
     private static FrameworkElement BuildTable(Table table, List<OutlineEntry> outline)
     {
         var grid = new Grid
@@ -492,22 +503,32 @@ public static class MarkdownRenderer
 
     // ---- Inline-level rendering -----------------------------------------------
 
-    private static void RenderInlines(ContainerInline container, InlineCollection target)
+    /// <param name="openHtml">
+    /// Elements opened by an inline HTML tag and not yet closed. Markdig reports inline
+    /// HTML one tag at a time, so the stack is what turns &lt;b&gt;…&lt;/b&gt; back into
+    /// a span wrapping the inlines between the two tags.
+    /// </param>
+    private static void RenderInlines(ContainerInline container, InlineCollection target, List<HtmlOpenSpan>? openHtml = null)
     {
+        openHtml ??= new List<HtmlOpenSpan>();
+
         foreach (MdInline inline in container)
         {
+            // Content flows into the innermost open HTML element, if there is one.
+            InlineCollection current = openHtml.Count > 0 ? openHtml[^1].Content : target;
+
             switch (inline)
             {
                 case LiteralInline literal:
-                    target.Add(new Run { Text = literal.Content.ToString() });
+                    current.Add(new Run { Text = literal.Content.ToString() });
                     break;
 
                 case EmphasisInline emphasis:
-                    target.Add(BuildEmphasis(emphasis));
+                    current.Add(BuildEmphasis(emphasis));
                     break;
 
                 case CodeInline code:
-                    target.Add(new Run
+                    current.Add(new Run
                     {
                         Text = code.Content,
                         FontFamily = MonoFont,
@@ -516,26 +537,32 @@ public static class MarkdownRenderer
                     break;
 
                 case LinkInline { IsImage: true } image:
-                    target.Add(BuildImage(image));
+                    current.Add(BuildImageInline(image.Url, InlineText(image)));
+                    break;
+
+                // [![badge](img)](url): a Hyperlink cannot hold an image, so the image
+                // itself becomes the clickable thing.
+                case LinkInline { IsImage: false } imageLink when FirstImage(imageLink) is { } inner:
+                    current.Add(BuildImageInline(inner.Url, InlineText(inner), href: imageLink.Url));
                     break;
 
                 case LinkInline link:
-                    target.Add(BuildLink(link));
+                    current.Add(BuildLink(link));
                     break;
 
                 case AutolinkInline auto:
                     var autoLink = new Hyperlink();
                     TrySetNavigateUri(autoLink, auto.Url);
                     autoLink.Inlines.Add(new Run { Text = auto.Url });
-                    target.Add(autoLink);
+                    current.Add(autoLink);
                     break;
 
                 case LineBreakInline lineBreak:
-                    target.Add(lineBreak.IsHard ? new LineBreak() : new Run { Text = " " });
+                    current.Add(lineBreak.IsHard ? new LineBreak() : new Run { Text = " " });
                     break;
 
                 case TaskList task:
-                    target.Add(new Run
+                    current.Add(new Run
                     {
                         Text = (task.Checked ? "☑" : "☐") + " ",
                         FontFamily = MonoFont,
@@ -543,26 +570,43 @@ public static class MarkdownRenderer
                     break;
 
                 case HtmlEntityInline entity:
-                    target.Add(new Run { Text = entity.Transcoded.ToString() });
+                    current.Add(new Run { Text = entity.Transcoded.ToString() });
                     break;
 
-                case HtmlInline:
-                    // Skip raw inline HTML tags in the native preview.
+                case HtmlInline html:
+                    HandleHtmlInline(html.Tag, target, openHtml);
                     break;
 
                 case ContainerInline nested:
-                    RenderInlines(nested, target);
+                    RenderInlines(nested, target, openHtml);
                     break;
 
                 default:
                     string? text = inline.ToString();
                     if (!string.IsNullOrEmpty(text))
                     {
-                        target.Add(new Run { Text = text });
+                        current.Add(new Run { Text = text });
                     }
                     break;
             }
         }
+    }
+
+    /// <summary>The first image anywhere under <paramref name="container"/>, if any.</summary>
+    private static LinkInline? FirstImage(ContainerInline container)
+    {
+        foreach (MdInline inline in container)
+        {
+            if (inline is LinkInline { IsImage: true } image)
+            {
+                return image;
+            }
+            if (inline is ContainerInline nested && FirstImage(nested) is { } found)
+            {
+                return found;
+            }
+        }
+        return null;
     }
 
     private static Span BuildEmphasis(EmphasisInline emphasis)
@@ -645,21 +689,6 @@ public static class MarkdownRenderer
         {
             target.Add(new Run { Text = link.Url });
         }
-    }
-
-    private static InlineUIContainer BuildImage(LinkInline image)
-    {
-        var img = new Image
-        {
-            Stretch = Stretch.Uniform,
-            MaxHeight = 480,
-            HorizontalAlignment = HorizontalAlignment.Left,
-        };
-        if (Uri.TryCreate(image.Url, UriKind.Absolute, out Uri? uri))
-        {
-            img.Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(uri);
-        }
-        return new InlineUIContainer { Child = img };
     }
 
     // ---- Helpers --------------------------------------------------------------
