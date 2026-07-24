@@ -9,7 +9,7 @@
     <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
     <AssemblyName>MdPad</AssemblyName>
     <Product>MdPad</Product>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <Platforms>x86;x64;ARM64</Platforms>
     <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLowerInvariant())</RuntimeIdentifier>
     <PublishProfile Condition="Exists('Properties\PublishProfiles\win-$(Platform).pubxml')">win-$(Platform).pubxml</PublishProfile>

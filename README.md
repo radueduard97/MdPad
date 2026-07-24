@@ -78,7 +78,7 @@ Relative links are the backbone of a multi-file skill, so MdPad treats them as f
 
 ## Install
 
-**Download** — grab `MdPad-1.0.0-win-x64.zip` from Releases, unzip, and run `Install.cmd`.
+**Download** — grab `MdPad-1.1.0-win-x64.zip` from Releases, unzip, and run `Install.cmd`.
 
 The installer is per-user and needs **no administrator rights**. It installs to `%LOCALAPPDATA%\Programs\MdPad`, adds Start-menu and desktop shortcuts, registers MdPad in the Windows *Open with* menu, and creates an Add/Remove Programs entry. The build is self-contained: no .NET runtime or Windows App SDK needed on the target machine.
 
@@ -92,7 +92,7 @@ The installer is per-user and needs **no administrator rights**. It installs to 
 
 ### MSIX package
 
-Prefer a packaged install? Grab `MdPad-1.0.0-win-x64-msix.zip` from Releases, unzip, and run `Install-Msix.ps1`. The package is self-contained and per-user; uninstall from Settings → Apps like any Store app.
+Prefer a packaged install? Grab `MdPad-1.1.0-win-x64-msix.zip` from Releases, unzip, and run `Install-Msix.ps1`. The package is self-contained and per-user; uninstall from Settings → Apps like any Store app.
 
 Because the package is signed with a self-signed developer certificate, its certificate has to be trusted before Windows will install it. `Install-Msix.ps1` does this for you: it imports the bundled `MdPad.cer` into the machine's *Trusted People* store (self-elevating for that one step), then installs the `.msix`. Once trusted, you can also just double-click the `.msix`.
 
