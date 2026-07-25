@@ -8,10 +8,7 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     Title="MdPad"
     mc:Ignorable="d">
-    <Window.SystemBackdrop>
-        <MicaBackdrop />
-    </Window.SystemBackdrop>
-
+    <!-- The backdrop is set in code so the setting can change it at runtime. -->
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />

@@ -62,10 +62,11 @@ public static class SkillAnalyzer
     /// <summary>
     /// Rough token estimate. Real tokenisers are model-specific; ~4 characters per
     /// token is the usual approximation for English prose and code, and it is close
-    /// enough to make budget decisions with.
+    /// enough to make budget decisions with. The divisor is configurable for anyone
+    /// who has measured their own content against a real tokeniser.
     /// </summary>
     public static int EstimateTokens(string? text) =>
-        string.IsNullOrEmpty(text) ? 0 : (int)Math.Ceiling(text.Length / 4.0);
+        string.IsNullOrEmpty(text) ? 0 : (int)Math.Ceiling(text.Length / Settings.Current.Skills.CharsPerToken);
 
     public static SkillBudget Analyze(string? markdown, string? documentPath)
     {
@@ -77,8 +78,8 @@ public static class SkillAnalyzer
         MarkdownDocument doc = Markdown.Parse(markdown, MarkdownRenderer.Pipeline);
 
         YamlFrontMatterBlock? yaml = doc.OfType<YamlFrontMatterBlock>().FirstOrDefault();
-        List<(string Key, string Value)> fields = yaml is null
-            ? new List<(string, string)>()
+        List<FrontMatterField> fields = yaml is null
+            ? new List<FrontMatterField>()
             : FrontMatter.Parse(yaml);
 
         string? name = FrontMatter.Find(fields, "name") ?? FrontMatter.Find(fields, "title");
@@ -155,13 +156,21 @@ public static class SkillAnalyzer
             .ToList();
     }
 
-    /// <summary>Markdown files under the document's folder, excluding noise directories.</summary>
+    /// <summary>
+    /// Files under the document's folder that orphan detection considers. Markdown only
+    /// by default — a skill's scripts and assets are legitimately unlinked more often
+    /// than not — widened to everything when the setting asks for it.
+    /// </summary>
     private static IEnumerable<string> EnumerateSkillFiles(string folder)
     {
+        SkillSettings settings = Settings.Current.Skills;
         IEnumerable<string> files;
         try
         {
-            files = Directory.EnumerateFiles(folder, "*.md", SearchOption.AllDirectories);
+            files = Directory.EnumerateFiles(
+                folder,
+                settings.OrphanScope == OrphanScope.AllFiles ? "*" : "*.md",
+                SearchOption.AllDirectories);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
@@ -171,8 +180,7 @@ public static class SkillAnalyzer
         int count = 0;
         foreach (string file in files)
         {
-            if (file.Contains($"{Path.DirectorySeparatorChar}node_modules{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
-                || file.Contains($"{Path.DirectorySeparatorChar}.git{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
+            if (PathFilter.IsExcluded(file, folder, settings.IgnorePatterns))
             {
                 continue;
             }
@@ -203,6 +211,13 @@ public static class SkillAnalyzer
     {
         int hash = url.IndexOf('#');
         return hash < 0 ? url : url[..hash];
+    }
+
+    /// <summary>The <c>#fragment</c> of a link target, or null when it carries none.</summary>
+    public static string? AnchorOf(string? url)
+    {
+        int hash = url?.IndexOf('#') ?? -1;
+        return hash < 0 || hash == url!.Length - 1 ? null : Uri.UnescapeDataString(url[(hash + 1)..]);
     }
 
     /// <summary>Resolve a link target against the folder of <paramref name="documentPath"/>.</summary>
@@ -269,6 +284,9 @@ public static class SkillAnalyzer
     };
 }
 
+/// <summary>One top-level front matter entry, and the source line it starts on.</summary>
+public sealed record FrontMatterField(string Key, string Value, int Line);
+
 /// <summary>
 /// Minimal YAML front matter reader: top-level "key: value" pairs, with indented
 /// lines and "- item" entries folded into the preceding value. Enough for the
@@ -276,14 +294,23 @@ public static class SkillAnalyzer
 /// </summary>
 public static class FrontMatter
 {
-    public static List<(string Key, string Value)> Parse(YamlFrontMatterBlock block)
+    public static List<FrontMatterField> Parse(YamlFrontMatterBlock block)
     {
-        var fields = new List<(string Key, string Value)>();
+        var fields = new List<FrontMatterField>();
         var pending = new StringBuilder();
         string? key = null;
+        int keyLine = 0;
 
-        foreach (string raw in block.Lines.Lines.Take(block.Lines.Count).Select(l => l.ToString()))
+        // Front matter is only recognised at the very top of a document, so a line's
+        // index within the block is its line in the file — shifted by one when the
+        // parser hands us the block without its opening "---".
+        List<string> lines = block.Lines.Lines.Take(block.Lines.Count).Select(l => l.ToString()).ToList();
+        int offset = lines.Count > 0 && lines[0].Trim() == "---" ? 0 : 1;
+
+        int index = 0;
+        foreach (string raw in lines)
         {
+            int lineNumber = offset + index++;
             string line = raw.TrimEnd();
             if (line.Length == 0 || line.Trim() is "---" or "...")
             {
@@ -297,6 +324,7 @@ public static class FrontMatter
             {
                 Flush();
                 key = line[..colon].Trim();
+                keyLine = lineNumber;
                 pending.Append(line[(colon + 1)..].Trim());
             }
             else if (key is not null)
@@ -311,7 +339,7 @@ public static class FrontMatter
         {
             if (key is not null)
             {
-                fields.Add((key, Unquote(pending.ToString())));
+                fields.Add(new FrontMatterField(key, Unquote(pending.ToString()), keyLine));
             }
             key = null;
             pending.Clear();
@@ -323,6 +351,23 @@ public static class FrontMatter
                 : value;
     }
 
-    public static string? Find(List<(string Key, string Value)> fields, string key) =>
-        fields.FirstOrDefault(f => string.Equals(f.Key, key, StringComparison.OrdinalIgnoreCase)).Value;
+    /// <summary>Read the front matter straight from Markdown source; empty when there is none.</summary>
+    public static List<FrontMatterField> Parse(string? markdown)
+    {
+        if (string.IsNullOrEmpty(markdown))
+        {
+            return new List<FrontMatterField>();
+        }
+
+        YamlFrontMatterBlock? block = Markdown.Parse(markdown, MarkdownRenderer.Pipeline)
+            .OfType<YamlFrontMatterBlock>()
+            .FirstOrDefault();
+
+        return block is null ? new List<FrontMatterField>() : Parse(block);
+    }
+
+    public static FrontMatterField? Field(List<FrontMatterField> fields, string key) =>
+        fields.FirstOrDefault(f => string.Equals(f.Key, key, StringComparison.OrdinalIgnoreCase));
+
+    public static string? Find(List<FrontMatterField> fields, string key) => Field(fields, key)?.Value;
 }

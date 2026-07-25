@@ -32,7 +32,30 @@ namespace MdPad;
 /// <param name="Text">Heading text with inline formatting stripped.</param>
 /// <param name="Line">Zero-based line of the heading in the Markdown source.</param>
 /// <param name="Element">The rendered element, used to scroll the preview to this section.</param>
-public sealed record OutlineEntry(int Level, string Text, int Line, FrameworkElement Element);
+/// <param name="Anchor">GitHub-style slug this heading answers to in a <c>#link</c>.</param>
+public sealed record OutlineEntry(int Level, string Text, int Line, FrameworkElement Element, string Anchor);
+
+/// <summary>
+/// The parts of the preview's appearance the settings pane owns. Body font and size
+/// are set on the host panel and inherit down the tree; these are the values the
+/// renderer sets explicitly and so has to be told about.
+/// </summary>
+public static class RenderOptions
+{
+    /// <summary>Family for code fences, <c>&lt;pre&gt;</c>, inline code and task-list markers.</summary>
+    public static string MonoFamily { get; set; } = "Consolas";
+
+    public static double CodeSize { get; set; } = 13;
+
+    /// <summary>Body line height in DIPs; 0 lets the font decide.</summary>
+    public static double LineHeight { get; set; } = 22;
+
+    /// <summary>Multiplier over every size the renderer sets itself, tracking the body size.</summary>
+    public static double Scale { get; set; } = 1.0;
+
+    /// <summary>Accent for links, quote bars and the skill label; null follows the system accent.</summary>
+    public static Color? Accent { get; set; }
+}
 
 /// <summary>
 /// Renders a Markdown string into a tree of native WinUI controls (no WebView2).
@@ -50,29 +73,57 @@ public static partial class MarkdownRenderer
         .Build();
 
     // WinUI's FontFamily takes a single family name -- unlike CSS/WPF it does not
-    // accept a comma-separated fallback list.
-    private static readonly FontFamily MonoFont = new("Consolas");
+    // accept a comma-separated fallback list. Cached because one render creates a
+    // great many code spans and each FontFamily is a resolved font resource.
+    private static FontFamily _monoFont = new("Consolas");
+    private static string _monoFamilyName = "Consolas";
+
+    private static FontFamily MonoFont
+    {
+        get
+        {
+            if (!string.Equals(_monoFamilyName, RenderOptions.MonoFamily, StringComparison.Ordinal))
+            {
+                _monoFamilyName = RenderOptions.MonoFamily;
+                _monoFont = new FontFamily(_monoFamilyName);
+            }
+            return _monoFont;
+        }
+    }
+
+    /// <summary>A size the renderer sets itself, scaled to the configured body size.</summary>
+    private static double Scaled(double size) => Math.Round(size * RenderOptions.Scale, 1);
 
     /// <summary>Folder of the document being rendered, for resolving relative links.</summary>
     private static string? _documentPath;
 
-    /// <summary>Invoked when a link to a local file is clicked.</summary>
-    private static Action<string>? _openLocalFile;
+    /// <summary>Invoked when a link to a local file is clicked, with its path and any <c>#fragment</c>.</summary>
+    private static Action<string, string?>? _openLocalFile;
+
+    /// <summary>Invoked when a link into this document (<c>#section</c>) is clicked.</summary>
+    private static Action<string>? _navigateAnchor;
+
+    /// <summary>Slugs handed out during the current render, for disambiguating repeats.</summary>
+    private static readonly Dictionary<string, int> SlugCounts = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Parse <paramref name="markdown"/> and (re)populate <paramref name="host"/> with rendered controls.
     /// Returns the document's headings in order, for the outline sidebar.
     /// </summary>
     /// <param name="documentPath">Path of the file being rendered; relative links resolve against it.</param>
-    /// <param name="openLocalFile">Called with a full path when the reader clicks a link to a local file.</param>
+    /// <param name="openLocalFile">Called with a full path and fragment when a link to a local file is clicked.</param>
+    /// <param name="navigateAnchor">Called with a slug when a link within this document is clicked.</param>
     public static IReadOnlyList<OutlineEntry> Render(
         string? markdown,
         Panel host,
         string? documentPath = null,
-        Action<string>? openLocalFile = null)
+        Action<string, string?>? openLocalFile = null,
+        Action<string>? navigateAnchor = null)
     {
         _documentPath = documentPath;
         _openLocalFile = openLocalFile;
+        _navigateAnchor = navigateAnchor;
+        SlugCounts.Clear();
         host.Children.Clear();
         var outline = new List<OutlineEntry>();
         MarkdownDocument doc = Markdown.Parse(markdown ?? string.Empty, Pipeline);
@@ -90,10 +141,13 @@ public static partial class MarkdownRenderer
         switch (block)
         {
             case HeadingBlock heading:
+            {
                 FrameworkElement headingElement = BuildHeading(heading);
                 host.Add(headingElement);
-                outline.Add(new OutlineEntry(heading.Level, InlineText(heading.Inline), heading.Line, headingElement));
+                string caption = InlineText(heading.Inline);
+                outline.Add(new OutlineEntry(heading.Level, caption, heading.Line, headingElement, TakeSlug(caption)));
                 break;
+            }
             case ParagraphBlock paragraph:
                 host.Add(BuildParagraph(paragraph));
                 break;
@@ -133,7 +187,7 @@ public static partial class MarkdownRenderer
     }
 
     /// <summary>Font size for a heading level, shared by Markdown and HTML headings.</summary>
-    private static double HeadingFontSize(int level) => level switch
+    private static double HeadingFontSize(int level) => Scaled(level switch
     {
         1 => 30,
         2 => 24,
@@ -141,7 +195,7 @@ public static partial class MarkdownRenderer
         4 => 17,
         5 => 15,
         _ => 13,
-    };
+    });
 
     private static FrameworkElement BuildHeading(HeadingBlock heading)
     {
@@ -201,7 +255,7 @@ public static partial class MarkdownRenderer
             IsTextSelectionEnabled = true,
             Margin = new Thickness(0, 0, 0, 10),
         };
-        var p = new Paragraph { LineHeight = 22 };
+        var p = new Paragraph { LineHeight = RenderOptions.LineHeight };
         if (paragraph.Inline is not null)
         {
             RenderInlines(paragraph.Inline, p.Inlines);
@@ -297,7 +351,7 @@ public static partial class MarkdownRenderer
         {
             Text = text,
             FontFamily = MonoFont,
-            FontSize = 13,
+            FontSize = RenderOptions.CodeSize,
             IsTextSelectionEnabled = true,
             TextWrapping = TextWrapping.NoWrap,
         };
@@ -329,7 +383,7 @@ public static partial class MarkdownRenderer
     /// </summary>
     private static FrameworkElement BuildFrontMatter(YamlFrontMatterBlock block)
     {
-        List<(string Key, string Value)> fields = FrontMatter.Parse(block);
+        List<FrontMatterField> fields = FrontMatter.Parse(block);
 
         string? name = FrontMatter.Find(fields, "name") ?? FrontMatter.Find(fields, "title");
         string? description = FrontMatter.Find(fields, "description") ?? FrontMatter.Find(fields, "summary");
@@ -339,7 +393,7 @@ public static partial class MarkdownRenderer
         stack.Children.Add(new TextBlock
         {
             Text = name is null ? "FRONT MATTER" : "SKILL",
-            FontSize = 11,
+            FontSize = Scaled(11),
             FontWeight = FontWeights.SemiBold,
             Foreground = Brush("AccentTextFillColorPrimaryBrush", Color.FromArgb(255, 120, 170, 255)),
         });
@@ -349,7 +403,7 @@ public static partial class MarkdownRenderer
             stack.Children.Add(new TextBlock
             {
                 Text = name,
-                FontSize = 26,
+                FontSize = Scaled(26),
                 FontWeight = FontWeights.SemiBold,
                 TextWrapping = TextWrapping.Wrap,
                 IsTextSelectionEnabled = true,
@@ -361,7 +415,7 @@ public static partial class MarkdownRenderer
             stack.Children.Add(new TextBlock
             {
                 Text = description,
-                FontSize = 13,
+                FontSize = Scaled(13),
                 TextWrapping = TextWrapping.Wrap,
                 IsTextSelectionEnabled = true,
                 Margin = new Thickness(0, 2, 0, 0),
@@ -387,7 +441,7 @@ public static partial class MarkdownRenderer
                 var key = new TextBlock
                 {
                     Text = rest[i].Key,
-                    FontSize = 12,
+                    FontSize = Scaled(12),
                     FontWeight = FontWeights.SemiBold,
                     Foreground = Brush("TextFillColorTertiaryBrush", Color.FromArgb(255, 140, 140, 140)),
                 };
@@ -398,7 +452,7 @@ public static partial class MarkdownRenderer
                 var value = new TextBlock
                 {
                     Text = rest[i].Value,
-                    FontSize = 12,
+                    FontSize = RenderOptions.CodeSize,
                     FontFamily = MonoFont,
                     TextWrapping = TextWrapping.Wrap,
                     IsTextSelectionEnabled = true,
@@ -551,7 +605,7 @@ public static partial class MarkdownRenderer
                     break;
 
                 case AutolinkInline auto:
-                    var autoLink = new Hyperlink();
+                    var autoLink = WithAccent(new Hyperlink());
                     TrySetNavigateUri(autoLink, auto.Url);
                     autoLink.Inlines.Add(new Run { Text = auto.Url });
                     current.Add(autoLink);
@@ -633,15 +687,67 @@ public static partial class MarkdownRenderer
         return span;
     }
 
+    /// <summary>
+    /// GitHub's heading slug: lowercased, punctuation dropped, spaces hyphenated. It is
+    /// what a reader's <c>[Setup](#setup)</c> is written against, so MdPad has to agree
+    /// with it rather than invent its own scheme.
+    /// </summary>
+    public static string Slugify(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return string.Empty;
+        }
+
+        var sb = new StringBuilder(text.Length);
+        foreach (char c in text.Trim().ToLowerInvariant())
+        {
+            if (char.IsLetterOrDigit(c) || c == '-' || c == '_')
+            {
+                sb.Append(c);
+            }
+            else if (char.IsWhiteSpace(c))
+            {
+                sb.Append('-');
+            }
+            // Everything else — punctuation, emoji, markup leftovers — is dropped.
+        }
+        return sb.ToString().Trim('-');
+    }
+
+    /// <summary>Slug for a heading, suffixed like GitHub's when the same text appears twice.</summary>
+    private static string TakeSlug(string text)
+    {
+        string slug = Slugify(text);
+        if (slug.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        int seen = SlugCounts.TryGetValue(slug, out int count) ? count : 0;
+        SlugCounts[slug] = seen + 1;
+        return seen == 0 ? slug : $"{slug}-{seen}";
+    }
+
     private static MdInlineElement BuildLink(LinkInline link)
     {
+        // A bare #fragment points inside this document: scroll rather than navigate.
+        if (link.Url is { Length: > 1 } url && url[0] == '#')
+        {
+            var jump = WithAccent(new Hyperlink());
+            string anchor = Uri.UnescapeDataString(url[1..]);
+            jump.Click += (_, _) => _navigateAnchor?.Invoke(anchor);
+            FillLinkText(link, jump.Inlines);
+            return jump;
+        }
+
         // A link to a file next to the document opens in a tab rather than a browser.
         if (SkillAnalyzer.IsLocalPath(link.Url))
         {
             return BuildLocalLink(link);
         }
 
-        var hyperlink = new Hyperlink();
+        var hyperlink = WithAccent(new Hyperlink());
         TrySetNavigateUri(hyperlink, link.Url);
         FillLinkText(link, hyperlink.Inlines);
         return hyperlink;
@@ -658,8 +764,9 @@ public static partial class MarkdownRenderer
 
         if (resolved is not null && System.IO.File.Exists(resolved))
         {
-            var hyperlink = new Hyperlink();
-            hyperlink.Click += (_, _) => _openLocalFile?.Invoke(resolved);
+            string? anchor = SkillAnalyzer.AnchorOf(link.Url);
+            var hyperlink = WithAccent(new Hyperlink());
+            hyperlink.Click += (_, _) => _openLocalFile?.Invoke(resolved, anchor);
             FillLinkText(link, hyperlink.Inlines);
             return hyperlink;
         }
@@ -764,10 +871,27 @@ public static partial class MarkdownRenderer
     /// <summary>Resolve a theme brush by resource key, falling back to a fixed color if absent.</summary>
     private static Brush Brush(string themeResourceKey, Color fallback)
     {
+        // A configured accent stands in for every accent-derived system brush, so one
+        // setting reaches quote bars, the skill label and links together.
+        if (RenderOptions.Accent is { } accent && themeResourceKey.StartsWith("Accent", StringComparison.Ordinal))
+        {
+            return new SolidColorBrush(accent);
+        }
+
         if (Application.Current.Resources.TryGetValue(themeResourceKey, out object value) && value is Brush brush)
         {
             return brush;
         }
         return new SolidColorBrush(fallback);
+    }
+
+    /// <summary>Links take the configured accent; left alone they follow the system one.</summary>
+    private static Hyperlink WithAccent(Hyperlink hyperlink)
+    {
+        if (RenderOptions.Accent is { } accent)
+        {
+            hyperlink.Foreground = new SolidColorBrush(accent);
+        }
+        return hyperlink;
     }
 }

@@ -94,7 +94,10 @@ public static partial class MarkdownRenderer
                 int level = node.Name[1] - '0';
                 FrameworkElement heading = BuildHtmlHeading(node, level, align);
                 host.Add(heading);
-                outline.Add(new OutlineEntry(level, HtmlText(node), line, heading));
+                string caption = HtmlText(node);
+                // An explicit id wins: that is the anchor the author linked against.
+                string anchor = node["id"] is { Length: > 0 } id ? id : TakeSlug(caption);
+                outline.Add(new OutlineEntry(level, caption, line, heading, anchor));
                 break;
             }
 
@@ -462,18 +465,27 @@ public static partial class MarkdownRenderer
 
     private static MdInlineElement BuildHtmlLink(string? href)
     {
+        if (href is { Length: > 1 } fragment && fragment[0] == '#')
+        {
+            var jump = WithAccent(new Hyperlink());
+            string anchor = Uri.UnescapeDataString(fragment[1..]);
+            jump.Click += (_, _) => _navigateAnchor?.Invoke(anchor);
+            return jump;
+        }
+
         if (SkillAnalyzer.IsLocalPath(href))
         {
             string? resolved = SkillAnalyzer.ResolveLocalPath(href, _documentPath);
             if (resolved is not null && System.IO.File.Exists(resolved))
             {
-                var local = new Hyperlink();
-                local.Click += (_, _) => _openLocalFile?.Invoke(resolved);
+                var local = WithAccent(new Hyperlink());
+                string? anchor = SkillAnalyzer.AnchorOf(href);
+                local.Click += (_, _) => _openLocalFile?.Invoke(resolved, anchor);
                 return local;
             }
         }
 
-        var hyperlink = new Hyperlink();
+        var hyperlink = WithAccent(new Hyperlink());
         TrySetNavigateUri(hyperlink, href);
         return hyperlink;
     }
@@ -553,7 +565,8 @@ public static partial class MarkdownRenderer
             : null;
         if (resolved is not null && System.IO.File.Exists(resolved))
         {
-            button.Click += (_, _) => _openLocalFile?.Invoke(resolved);
+            string? anchor = SkillAnalyzer.AnchorOf(href);
+            button.Click += (_, _) => _openLocalFile?.Invoke(resolved, anchor);
         }
         else if (Uri.TryCreate(href, UriKind.Absolute, out Uri? target))
         {

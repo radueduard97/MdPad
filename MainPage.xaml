@@ -52,6 +52,8 @@
                 <RowDefinition Height="*" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
 
             <TextBlock
@@ -146,10 +148,84 @@
                     </DataTemplate>
                 </ListView.ItemTemplate>
             </ListView>
+
+            <!-- The metadata contract a SKILL.md has to satisfy; hidden for plain Markdown -->
+            <TextBlock
+                x:Name="ValidationHeader"
+                Grid.Row="4"
+                Margin="16,10,16,6"
+                Text="FRONT MATTER"
+                FontSize="11"
+                FontWeight="SemiBold"
+                Visibility="Collapsed"
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+
+            <StackPanel Grid.Row="5">
+                <StackPanel
+                    x:Name="ValidationOkRow"
+                    Orientation="Horizontal"
+                    Margin="18,0,18,12"
+                    Spacing="8"
+                    Visibility="Collapsed">
+                    <FontIcon Glyph="&#xE73E;" FontSize="12" VerticalAlignment="Top" Margin="0,2,0,0" Foreground="#FF6FBF73" />
+                    <TextBlock
+                        Text="Nothing to fix — name, description and tools all check out."
+                        FontSize="12"
+                        TextWrapping="Wrap"
+                        Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                </StackPanel>
+
+                <ListView
+                    x:Name="ValidationList"
+                    Padding="8,0,8,10"
+                    MaxHeight="260"
+                    Visibility="Collapsed"
+                    IsItemClickEnabled="True"
+                    SelectionMode="None"
+                    ItemClick="OnValidationIssueClick"
+                    ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                    <ListView.ItemContainerStyle>
+                        <Style TargetType="ListViewItem">
+                            <Setter Property="MinHeight" Value="30" />
+                            <Setter Property="Padding" Value="10,5,8,5" />
+                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                        </Style>
+                    </ListView.ItemContainerStyle>
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="local:ValidationItem">
+                            <Grid ColumnSpacing="8" ToolTipService.ToolTip="{x:Bind Tip}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <FontIcon
+                                    Grid.Column="0"
+                                    FontSize="12"
+                                    Glyph="{x:Bind Glyph}"
+                                    Foreground="{x:Bind Accent}"
+                                    VerticalAlignment="Top"
+                                    Margin="0,2,0,0" />
+                                <StackPanel Grid.Column="1">
+                                    <TextBlock
+                                        Text="{x:Bind Message}"
+                                        FontSize="12"
+                                        TextWrapping="Wrap" />
+                                    <TextBlock
+                                        Text="{x:Bind Field}"
+                                        FontSize="11"
+                                        FontFamily="Consolas"
+                                        Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                                </StackPanel>
+                            </Grid>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+            </StackPanel>
         </Grid>
 
         <Grid Grid.Column="1">
             <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
                 <RowDefinition Height="Auto" />
@@ -166,12 +242,15 @@
                 <MenuBar Grid.Column="0" VerticalAlignment="Center">
                     <MenuBarItem Title="File">
                         <MenuFlyoutItem Text="New tab" Click="OnNew" KeyboardAcceleratorTextOverride="Ctrl+T" />
+                        <MenuFlyoutItem Text="New skill…" Click="OnNewSkill" KeyboardAcceleratorTextOverride="Ctrl+Shift+N" />
                         <MenuFlyoutItem Text="Open…" Click="OnOpen" KeyboardAcceleratorTextOverride="Ctrl+O" />
                         <MenuFlyoutSeparator />
                         <MenuFlyoutItem Text="Save" Click="OnSave" KeyboardAcceleratorTextOverride="Ctrl+S" />
                         <MenuFlyoutItem Text="Save as…" Click="OnSaveAs" KeyboardAcceleratorTextOverride="Ctrl+Shift+S" />
                         <MenuFlyoutSeparator />
                         <MenuFlyoutItem Text="Close tab" Click="OnCloseTab" KeyboardAcceleratorTextOverride="Ctrl+W" />
+                        <MenuFlyoutSeparator />
+                        <MenuFlyoutItem Text="Settings…" Click="OnSettings" KeyboardAcceleratorTextOverride="Ctrl+," />
                         <MenuFlyoutItem Text="Exit" Click="OnExit" />
                     </MenuBarItem>
 
@@ -184,12 +263,18 @@
                         <MenuFlyoutItem Text="Paste" Click="OnPaste" KeyboardAcceleratorTextOverride="Ctrl+V" />
                         <MenuFlyoutSeparator />
                         <MenuFlyoutItem Text="Select all" Click="OnSelectAll" KeyboardAcceleratorTextOverride="Ctrl+A" />
+                        <MenuFlyoutSeparator />
+                        <MenuFlyoutItem Text="Find…" Click="OnFindCommand" KeyboardAcceleratorTextOverride="Ctrl+F" />
+                        <MenuFlyoutItem Text="Replace…" Click="OnReplaceCommand" KeyboardAcceleratorTextOverride="Ctrl+H" />
+                        <MenuFlyoutSeparator />
+                        <MenuFlyoutItem Text="Extract to a reference…" Click="OnExtractReference" KeyboardAcceleratorTextOverride="Ctrl+Shift+E" />
                     </MenuBarItem>
 
                     <MenuBarItem Title="View">
                         <RadioMenuFlyoutItem x:Name="EditModeMenuItem" Text="Editor only" GroupName="ViewMode" Click="OnEditMode" />
                         <RadioMenuFlyoutItem x:Name="SplitModeMenuItem" Text="Split" GroupName="ViewMode" IsChecked="True" Click="OnSplitMode" />
                         <RadioMenuFlyoutItem x:Name="PreviewModeMenuItem" Text="Preview only" GroupName="ViewMode" Click="OnPreviewMode" />
+                        <RadioMenuFlyoutItem x:Name="AgentModeMenuItem" Text="Agent view" GroupName="ViewMode" Click="OnAgentMode" />
                         <MenuFlyoutSeparator />
                         <ToggleMenuFlyoutItem x:Name="OutlineMenuItem" Text="Outline sidebar" IsChecked="True" Click="OnToggleOutline" KeyboardAcceleratorTextOverride="Ctrl+\" />
                     </MenuBarItem>
@@ -272,13 +357,152 @@
                     <ToggleButton x:Name="PreviewModeButton" Click="OnPreviewMode" Style="{StaticResource ToolToggleStyle}" ToolTipService.ToolTip="Preview only">
                         <FontIcon Glyph="&#xE890;" FontSize="16" />
                     </ToggleButton>
+                    <ToggleButton x:Name="AgentModeButton" Click="OnAgentMode" Style="{StaticResource ToolToggleStyle}" ToolTipService.ToolTip="Agent view — what the model actually receives">
+                        <FontIcon Glyph="&#xE99A;" FontSize="16" />
+                    </ToggleButton>
                 </StackPanel>
             </Grid>
+
+            <!--
+                Find and replace. Folder scope is what makes this useful for a skill:
+                a section rename has to reach SKILL.md and every reference beside it.
+            -->
+            <Border
+                x:Name="FindBar"
+                Grid.Row="1"
+                Margin="8,2,12,0"
+                Padding="10,8,8,8"
+                CornerRadius="8"
+                Visibility="Collapsed"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderThickness="1"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
+                <StackPanel Spacing="6">
+                    <Grid ColumnSpacing="6">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+
+                        <TextBox
+                            x:Name="FindBox"
+                            Grid.Column="0"
+                            MinWidth="180"
+                            PlaceholderText="Find"
+                            TextChanged="OnFindTextChanged"
+                            KeyDown="OnFindBoxKeyDown" />
+
+                        <ToggleButton
+                            x:Name="MatchCaseToggle"
+                            Grid.Column="1"
+                            Click="OnMatchCaseToggled"
+                            Style="{StaticResource ToolToggleStyle}"
+                            ToolTipService.ToolTip="Match case">
+                            <TextBlock Text="Aa" FontSize="13" />
+                        </ToggleButton>
+
+                        <ComboBox
+                            x:Name="ScopeBox"
+                            Grid.Column="2"
+                            MinWidth="150"
+                            SelectedIndex="0"
+                            SelectionChanged="OnScopeChanged"
+                            ToolTipService.ToolTip="Where to search">
+                            <ComboBoxItem Content="This file" />
+                            <ComboBoxItem Content="This folder" />
+                        </ComboBox>
+
+                        <Button Grid.Column="3" Click="OnFindPrevious" Style="{StaticResource ToolButtonStyle}" ToolTipService.ToolTip="Previous match (Shift+F3)">
+                            <FontIcon Glyph="&#xE74A;" FontSize="14" />
+                        </Button>
+                        <Button Grid.Column="4" Click="OnFindNext" Style="{StaticResource ToolButtonStyle}" ToolTipService.ToolTip="Next match (F3)">
+                            <FontIcon Glyph="&#xE74B;" FontSize="14" />
+                        </Button>
+
+                        <TextBlock
+                            x:Name="FindStatusText"
+                            Grid.Column="5"
+                            MinWidth="96"
+                            FontSize="12"
+                            VerticalAlignment="Center"
+                            TextTrimming="CharacterEllipsis"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+
+                        <Button Grid.Column="6" Click="OnCloseFind" Style="{StaticResource ToolButtonStyle}" ToolTipService.ToolTip="Close (Esc)">
+                            <FontIcon Glyph="&#xE711;" FontSize="14" />
+                        </Button>
+                    </Grid>
+
+                    <Grid x:Name="ReplaceRow" ColumnSpacing="6" Visibility="Collapsed">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+
+                        <TextBox
+                            x:Name="ReplaceBox"
+                            Grid.Column="0"
+                            MinWidth="180"
+                            PlaceholderText="Replace with"
+                            KeyDown="OnReplaceBoxKeyDown" />
+                        <Button Grid.Column="1" Content="Replace" Click="OnReplaceOne" Padding="10,4" />
+                        <Button Grid.Column="2" Content="Replace all" Click="OnReplaceAll" Padding="10,4" />
+                    </Grid>
+
+                    <ListView
+                        x:Name="ResultsList"
+                        MaxHeight="190"
+                        Visibility="Collapsed"
+                        IsItemClickEnabled="True"
+                        SelectionMode="None"
+                        ItemClick="OnResultClick"
+                        ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                        <ListView.ItemContainerStyle>
+                            <Style TargetType="ListViewItem">
+                                <Setter Property="MinHeight" Value="34" />
+                                <Setter Property="Padding" Value="8,4,8,4" />
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                            </Style>
+                        </ListView.ItemContainerStyle>
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="local:SearchResultItem">
+                                <Grid ColumnSpacing="10" ToolTipService.ToolTip="{x:Bind Tip}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock
+                                        Grid.Column="0"
+                                        Text="{x:Bind Location}"
+                                        FontSize="11"
+                                        FontFamily="Consolas"
+                                        VerticalAlignment="Center"
+                                        Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                                    <TextBlock
+                                        Grid.Column="1"
+                                        Text="{x:Bind Preview}"
+                                        FontSize="12"
+                                        FontFamily="Consolas"
+                                        VerticalAlignment="Center"
+                                        TextTrimming="CharacterEllipsis"
+                                        TextWrapping="NoWrap" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                </StackPanel>
+            </Border>
 
             <!-- The document surface: opaque, rounded, and shadowed over the Mica behind it. -->
             <Border
                 x:Name="ContentCard"
-                Grid.Row="1"
+                Grid.Row="2"
                 Margin="8,2,12,10"
                 CornerRadius="8"
                 Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
@@ -296,21 +520,49 @@
                         <ColumnDefinition x:Name="PreviewColumn" Width="*" />
                     </Grid.ColumnDefinitions>
 
-                    <TextBox
-                        x:Name="Editor"
-                        Grid.Column="0"
-                        AcceptsReturn="True"
-                        TextWrapping="Wrap"
-                        IsSpellCheckEnabled="False"
-                        FontFamily="Consolas"
-                        FontSize="14"
-                        Padding="14,12,14,12"
-                        BorderThickness="0"
-                        Background="Transparent"
-                        TextChanged="OnEditorTextChanged"
-                        ScrollViewer.VerticalScrollBarVisibility="Auto"
-                        ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                        PlaceholderText="Start typing Markdown…" />
+                    <!--
+                        Editor plus its optional line-number gutter. The gutter is a
+                        hidden-scrollbar ScrollViewer rather than a plain TextBlock so it
+                        clips at the top when it is scrolled to follow the editor.
+                    -->
+                    <Grid x:Name="EditorHost" Grid.Column="0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <ScrollViewer
+                            x:Name="GutterScroller"
+                            Grid.Column="0"
+                            Visibility="Collapsed"
+                            IsHitTestVisible="False"
+                            Padding="10,12,6,12"
+                            VerticalScrollBarVisibility="Hidden"
+                            HorizontalScrollBarVisibility="Disabled"
+                            HorizontalScrollMode="Disabled">
+                            <TextBlock
+                                x:Name="GutterText"
+                                TextAlignment="Right"
+                                IsTextSelectionEnabled="False"
+                                Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        </ScrollViewer>
+
+                        <TextBox
+                            x:Name="Editor"
+                            Grid.Column="1"
+                            AcceptsReturn="True"
+                            TextWrapping="Wrap"
+                            IsSpellCheckEnabled="False"
+                            FontFamily="Consolas"
+                            FontSize="14"
+                            Padding="14,12,14,12"
+                            BorderThickness="0"
+                            Background="Transparent"
+                            TextChanged="OnEditorTextChanged"
+                            ScrollViewer.VerticalScrollBarVisibility="Auto"
+                            ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                            PlaceholderText="Start typing Markdown…" />
+                    </Grid>
 
                     <Border
                         x:Name="Splitter"
@@ -333,11 +585,24 @@
                         HorizontalScrollMode="Disabled">
                         <StackPanel x:Name="PreviewHost" MaxWidth="820" HorizontalAlignment="Left" />
                     </ScrollViewer>
+
+                    <!-- Agent view: the same document as the model receives it, by tier -->
+                    <ScrollViewer
+                        x:Name="AgentScroller"
+                        Grid.Column="0"
+                        Grid.ColumnSpan="3"
+                        Padding="18,14,18,14"
+                        Visibility="Collapsed"
+                        VerticalScrollBarVisibility="Auto"
+                        HorizontalScrollBarVisibility="Disabled"
+                        HorizontalScrollMode="Disabled">
+                        <StackPanel x:Name="AgentHost" MaxWidth="900" HorizontalAlignment="Left" Spacing="14" />
+                    </ScrollViewer>
                 </Grid>
             </Border>
 
             <!-- Status line, on the Mica rather than the card -->
-            <Grid Grid.Row="2" Padding="4,0,14,6">
+            <Grid Grid.Row="3" Padding="4,0,14,6">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />

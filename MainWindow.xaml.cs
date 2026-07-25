@@ -1,11 +1,15 @@
 using System;
 using System.Runtime.InteropServices;
 
+using Microsoft.UI;
+using Microsoft.UI.Composition.SystemBackdrops;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 
 using Windows.Graphics;
+using Windows.UI;
 
 // To learn more about WinUI, the WinUI project structure,
 // and more about our project templates, see: http://aka.ms/winui-project-info.
@@ -28,9 +32,68 @@ public sealed partial class MainWindow : Window
 
         AppWindow.SetIcon("Assets/AppIcon.ico");
         SizeToWorkArea();
+        ApplyAppearance();
 
         // Navigate the root frame to the main page on startup.
         RootFrame.Navigate(typeof(MainPage));
+    }
+
+    /// <summary>
+    /// Put the configured theme and backdrop on the window. The theme goes on the root
+    /// content rather than the page, so the tab strip — which is the title bar — changes
+    /// with it; the caption buttons are not XAML at all and have to be told separately.
+    /// </summary>
+    public void ApplyAppearance()
+    {
+        AppearanceSettings appearance = Settings.Current.Appearance;
+
+        if (Content is FrameworkElement root)
+        {
+            root.RequestedTheme = appearance.Theme switch
+            {
+                AppTheme.Light => ElementTheme.Light,
+                AppTheme.Dark => ElementTheme.Dark,
+                _ => ElementTheme.Default,
+            };
+
+            // Solid backdrop means no Mica to show through, so the window needs a fill.
+            root.SetValue(
+                Panel.BackgroundProperty,
+                appearance.Backdrop == BackdropKind.Solid
+                    ? Application.Current.Resources["SolidBackgroundFillColorBaseBrush"]
+                    : null);
+        }
+
+        SystemBackdrop = appearance.Backdrop switch
+        {
+            BackdropKind.Mica => new MicaBackdrop(),
+            BackdropKind.MicaAlt => new MicaBackdrop { Kind = MicaKind.BaseAlt },
+            BackdropKind.Acrylic => new DesktopAcrylicBackdrop(),
+            _ => null,
+        };
+
+        ApplyCaptionColors();
+    }
+
+    /// <summary>Keep the minimise/maximise/close glyphs legible under a forced theme.</summary>
+    private void ApplyCaptionColors()
+    {
+        bool dark = Settings.Current.Appearance.Theme switch
+        {
+            AppTheme.Light => false,
+            AppTheme.Dark => true,
+            _ => Application.Current.RequestedTheme == ApplicationTheme.Dark,
+        };
+
+        AppWindowTitleBar bar = AppWindow.TitleBar;
+        bar.ButtonBackgroundColor = Colors.Transparent;
+        bar.ButtonInactiveBackgroundColor = Colors.Transparent;
+        bar.ButtonForegroundColor = dark ? Colors.White : Colors.Black;
+        bar.ButtonInactiveForegroundColor = dark ? Colors.Gray : Colors.DimGray;
+        bar.ButtonHoverForegroundColor = dark ? Colors.White : Colors.Black;
+        bar.ButtonHoverBackgroundColor = dark
+            ? Color.FromArgb(24, 255, 255, 255)
+            : Color.FromArgb(24, 0, 0, 0);
     }
 
     /// <summary>

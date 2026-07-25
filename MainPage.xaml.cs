@@ -69,6 +69,36 @@ public sealed class ReferenceItem
     };
 }
 
+/// <summary>One row in the sidebar's front matter validation list.</summary>
+public sealed class ValidationItem
+{
+    public ValidationItem(SkillIssue issue) => Issue = issue;
+
+    public SkillIssue Issue { get; }
+
+    public string Message => Issue.Message;
+
+    public string Field => Issue.Field;
+
+    public string Glyph => Issue.Severity switch
+    {
+        IssueSeverity.Error => "",    // ErrorBadge
+        IssueSeverity.Warning => "",  // Warning
+        _ => "",                      // Info
+    };
+
+    public Brush Accent => new SolidColorBrush(Issue.Severity switch
+    {
+        IssueSeverity.Error => Color.FromArgb(255, 230, 100, 100),
+        IssueSeverity.Warning => Color.FromArgb(255, 220, 180, 90),
+        _ => Color.FromArgb(255, 140, 165, 200),
+    });
+
+    public string Tip => Issue.Hint is null
+        ? $"{Issue.Field} — {Issue.Message}"
+        : $"{Issue.Field} — {Issue.Message}\n{Issue.Hint}";
+}
+
 public sealed partial class MainPage : Page
 {
     private const string AppName = "MdPad";
@@ -83,9 +113,16 @@ public sealed partial class MainPage : Page
     private readonly ObservableCollection<OutlineItem> _outline = new();
     private readonly ObservableCollection<MdDocument> _documents = new();
     private readonly ObservableCollection<ReferenceItem> _references = new();
+    private readonly ObservableCollection<ValidationItem> _issues = new();
 
     private MdDocument _current = new();
+
+    /// <summary>Headings from the last render, at every level — what a <c>#link</c> resolves against.</summary>
+    private IReadOnlyList<OutlineEntry> _headings = Array.Empty<OutlineEntry>();
+
     private SkillBudget _budget = SkillBudget.Empty;
+    private SkillValidationResult _validation = SkillValidationResult.NotASkill;
+    private ViewMode _mode = ViewMode.Split;
     private int _words;
     private int _chars;
     private bool _suppressOutlineNavigation;
@@ -97,6 +134,7 @@ public sealed partial class MainPage : Page
 
         OutlineList.ItemsSource = _outline;
         ReferenceList.ItemsSource = _references;
+        ValidationList.ItemsSource = _issues;
 
         _renderDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(180) };
         _renderDebounce.Tick += (_, _) =>
@@ -123,30 +161,42 @@ public sealed partial class MainPage : Page
         AddAccelerator(VirtualKey.Number3, VirtualKeyModifiers.Control, () => ApplyHeading(3));
         AddAccelerator(BackslashKey, VirtualKeyModifiers.Control, ToggleOutline);
 
+        AddAccelerator(VirtualKey.N, VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, async () => await NewSkillAsync());
+        AddAccelerator(VirtualKey.F, VirtualKeyModifiers.Control, () => OpenFind(replace: false));
+        AddAccelerator(VirtualKey.H, VirtualKeyModifiers.Control, () => OpenFind(replace: true));
+        AddAccelerator(VirtualKey.F3, VirtualKeyModifiers.None, () => StepMatch(forward: true));
+        AddAccelerator(VirtualKey.F3, VirtualKeyModifiers.Shift, () => StepMatch(forward: false));
+        AddAccelerator(VirtualKey.E, VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift, async () => await ExtractReferenceAsync());
+
+        InitializeSession();
+        InitializeSettings();
         Loaded += OnLoaded;
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
         AttachTabs();
+        ApplySettings();
 
-        // Launched with a file ("Open with MdPad")? Start on it instead of the sample.
-        bool hasStartupFile = App.StartupFile is not null;
-        var first = hasStartupFile
-            ? new MdDocument()
-            : new MdDocument { Text = WelcomeSample, SavedText = Normalize(WelcomeSample) };
-
-        _documents.Add(first);
-        SelectDocument(first);
-
+        // Launched with a file ("Open with MdPad")? Start on it instead of anything stored.
         if (App.StartupFile is { } path)
         {
+            var blank = new MdDocument();
+            _documents.Add(blank);
+            SelectDocument(blank);
             await OpenPathAsync(path);
         }
-        else
+        else if (!await RestoreSessionAsync())
         {
+            var first = new MdDocument { Text = WelcomeSample, SavedText = Normalize(WelcomeSample) };
+            _documents.Add(first);
+            SelectDocument(first);
             Editor.Focus(FocusState.Programmatic);
         }
+
+        // Only now is what is on screen worth storing: until the restore has run, a save
+        // would overwrite the previous session with a half-built one.
+        _sessionReady = true;
     }
 
     // ---- Tabs -----------------------------------------------------------------
@@ -159,6 +209,10 @@ public sealed partial class MainPage : Page
         {
             return;
         }
+
+        // The session is written on close as well as on a timer, so a clean exit never
+        // loses the last few seconds of work.
+        window.Closed += (_, _) => SaveSession();
 
         _tabs = window.Tabs;
         _tabs.TabItemsSource = _documents;
@@ -243,6 +297,7 @@ public sealed partial class MainPage : Page
         UpdateCounts();
         UpdateTitle();
         PreviewScroller.ChangeView(null, document.PreviewOffset, null, disableAnimation: true);
+        MarkSessionDirty();
     }
 
     /// <summary>Copy live editor state back into the current document.</summary>
@@ -266,6 +321,8 @@ public sealed partial class MainPage : Page
 
         int index = _documents.IndexOf(document);
         _documents.Remove(document);
+        MarkSessionDirty();
+        RefreshWatchers();
 
         if (_documents.Count == 0)
         {
@@ -284,6 +341,9 @@ public sealed partial class MainPage : Page
 
     private void OnEditorTextChanged(object sender, TextChangedEventArgs e)
     {
+        HandleAutoClose();
+        UpdateGutterNumbers();
+
         if (!_switchingTabs)
         {
             _current.Text = Editor.Text;
@@ -292,6 +352,7 @@ public sealed partial class MainPage : Page
         }
 
         UpdateCounts();
+        MarkSessionDirty();
         _renderDebounce.Stop();
         _renderDebounce.Start();
     }
@@ -304,10 +365,15 @@ public sealed partial class MainPage : Page
                 Editor.Text,
                 PreviewHost,
                 _current.Path,
-                path => _ = OpenPathAsync(path));
+                (path, anchor) => _ = OpenPathAsync(path, anchor),
+                anchor => NavigateToAnchor(anchor));
 
+            _headings = headings;
             UpdateOutline(headings);
             UpdateBudget();
+
+            // A render replaces the whole control tree, taking the search marks with it.
+            HighlightMatches();
         }
         catch (Exception ex)
         {
@@ -335,9 +401,16 @@ public sealed partial class MainPage : Page
     private void UpdateBudget()
     {
         _budget = SkillAnalyzer.Analyze(Editor.Text, _current.Path);
+        _validation = SkillValidator.Validate(Editor.Text, _current.Path);
         UpdateStatusLine();
         UpdateReferenceList();
+        UpdateValidationList();
         BuildBudgetBreakdown();
+
+        if (_mode == ViewMode.Agent)
+        {
+            BuildAgentView();
+        }
     }
 
     private void UpdateStatusLine()
@@ -349,6 +422,24 @@ public sealed partial class MainPage : Page
               $"~{SkillAnalyzer.Format(_budget.InvokeTokens)} on invoke · " +
               $"~{SkillAnalyzer.Format(_budget.OnDemandTokens)} on demand"
             : $"{_words} words · {_chars} chars · ~{SkillAnalyzer.Format(SkillAnalyzer.EstimateTokens(Editor.Text))} tokens";
+
+        CountText.Foreground = BudgetBrush();
+    }
+
+    /// <summary>
+    /// The meter turns amber and then red as the on-invoke body grows: the thresholds are
+    /// a judgement call, so they are settings rather than constants. Anything that is not
+    /// a skill is just a word count and stays quiet.
+    /// </summary>
+    private Brush BudgetBrush()
+    {
+        SkillSettings skills = Settings.Current.Skills;
+        string key = !_budget.HasFrontMatter ? "TextFillColorSecondaryBrush"
+            : _budget.InvokeTokens >= skills.BudgetErrorTokens ? "SystemFillColorCriticalBrush"
+            : _budget.InvokeTokens >= skills.BudgetWarnTokens ? "SystemFillColorCautionBrush"
+            : "TextFillColorSecondaryBrush";
+
+        return (Brush)Application.Current.Resources[key];
     }
 
     private void UpdateReferenceList()
@@ -365,6 +456,220 @@ public sealed partial class MainPage : Page
 
         string suffix = _budget.MissingCount > 0 ? $" · {_budget.MissingCount} missing" : string.Empty;
         ReferencesHeader.Text = "REFERENCES" + suffix;
+    }
+
+    // ---- Agent view -----------------------------------------------------------
+
+    /// <summary>
+    /// Rebuild the agent view: one card per context tier, each holding the exact text a
+    /// model receives at that tier. Everything here is monospace and copyable, because
+    /// the point is to read it the way the model gets it, not the way a reader would.
+    /// </summary>
+    private void BuildAgentView()
+    {
+        IReadOnlyList<AgentBlock> blocks = AgentTranscript.Build(Editor.Text, _current.Path, _budget);
+
+        AgentHost.Children.Clear();
+        AgentHost.Children.Add(BuildAgentHeader(blocks));
+
+        foreach (AgentBlock block in blocks)
+        {
+            AgentHost.Children.Add(BuildAgentCard(block));
+        }
+
+        AgentHost.Children.Add(new TextBlock
+        {
+            Text = $"Token counts are estimates (~{Settings.Current.Skills.CharsPerToken:0.#} characters per token), and the wrapper text an agent adds around a skill is not shown.",
+            FontSize = 11,
+            Margin = new Thickness(2, 4, 0, 0),
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = (Brush)Application.Current.Resources["TextFillColorTertiaryBrush"],
+        });
+    }
+
+    private FrameworkElement BuildAgentHeader(IReadOnlyList<AgentBlock> blocks)
+    {
+        var header = new Grid { ColumnSpacing = 12 };
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        var left = new StackPanel();
+        left.Children.Add(new TextBlock
+        {
+            Text = _budget.HasFrontMatter ? "What the model receives" : "What the model receives (not a skill)",
+            FontSize = 20,
+            FontWeight = FontWeights.SemiBold,
+            TextWrapping = TextWrapping.Wrap,
+        });
+        left.Children.Add(new TextBlock
+        {
+            Text = _budget.HasFrontMatter
+                ? "The same file, split by when each part enters the context window."
+                : "No front matter, so there is no listing entry and nothing is preloaded.",
+            FontSize = 12,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+        });
+        Grid.SetColumn(left, 0);
+        header.Children.Add(left);
+
+        var copyAll = new Button
+        {
+            Content = "Copy all",
+            Padding = new Thickness(10, 4, 10, 4),
+            VerticalAlignment = VerticalAlignment.Top,
+        };
+        copyAll.Click += (_, _) => CopyToClipboard(AgentTranscript.Compose(blocks));
+        ToolTipService.SetToolTip(copyAll, "Copy the whole transcript");
+        Grid.SetColumn(copyAll, 1);
+        header.Children.Add(copyAll);
+
+        return header;
+    }
+
+    private FrameworkElement BuildAgentCard(AgentBlock block)
+    {
+        var stack = new StackPanel { Spacing = 6 };
+
+        var title = new Grid { ColumnSpacing = 10 };
+        title.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        title.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        title.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        var heading = new TextBlock
+        {
+            Text = block.Title.ToUpperInvariant(),
+            FontSize = 11,
+            FontWeight = FontWeights.SemiBold,
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = AgentTierBrush(block.Tier),
+        };
+        Grid.SetColumn(heading, 0);
+        title.Children.Add(heading);
+
+        var cost = new TextBlock
+        {
+            Text = "~" + SkillAnalyzer.Format(block.Tokens) + " tokens",
+            FontSize = 12,
+            FontFamily = new FontFamily("Consolas"),
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+        };
+        Grid.SetColumn(cost, 1);
+        title.Children.Add(cost);
+
+        var copy = new Button
+        {
+            Padding = new Thickness(8, 2, 8, 2),
+            Background = new SolidColorBrush(Color.FromArgb(0, 0, 0, 0)),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(0, 0, 0, 0)),
+            Content = new FontIcon { Glyph = "", FontSize = 14 },  // Copy
+        };
+        copy.Click += (_, _) => CopyToClipboard(block.Text);
+        ToolTipService.SetToolTip(copy, "Copy this block");
+        Grid.SetColumn(copy, 2);
+        title.Children.Add(copy);
+
+        stack.Children.Add(title);
+        stack.Children.Add(new TextBlock
+        {
+            Text = block.Note,
+            FontSize = 12,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+        });
+
+        stack.Children.Add(new Border
+        {
+            Background = (Brush)Application.Current.Resources["CardBackgroundFillColorSecondaryBrush"],
+            BorderBrush = (Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"],
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(6),
+            Padding = new Thickness(12, 10, 12, 10),
+            Margin = new Thickness(0, 2, 0, 0),
+            Child = new TextBlock
+            {
+                Text = block.Text.Length == 0 ? "(empty)" : block.Text,
+                FontFamily = new FontFamily("Consolas"),
+                FontSize = 12.5,
+                TextWrapping = TextWrapping.Wrap,
+                IsTextSelectionEnabled = true,
+            },
+        });
+
+        return stack;
+    }
+
+    /// <summary>Tiers keep the same colour language as the reference list: cost, then caution, then cheap.</summary>
+    private static Brush AgentTierBrush(AgentTier tier) => new SolidColorBrush(tier switch
+    {
+        AgentTier.Always => Color.FromArgb(255, 230, 140, 110),
+        AgentTier.OnInvoke => Color.FromArgb(255, 220, 180, 90),
+        _ => Color.FromArgb(255, 130, 170, 255),
+    });
+
+    private static void CopyToClipboard(string text)
+    {
+        var package = new Windows.ApplicationModel.DataTransfer.DataPackage
+        {
+            RequestedOperation = Windows.ApplicationModel.DataTransfer.DataPackageOperation.Copy,
+        };
+        package.SetText(text);
+        Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(package);
+    }
+
+    // ---- Front matter validation ----------------------------------------------
+
+    /// <summary>
+    /// Show what is wrong with the skill's metadata contract. The whole section stays
+    /// hidden for ordinary Markdown, where none of these rules mean anything.
+    /// </summary>
+    private void UpdateValidationList()
+    {
+        _issues.Clear();
+        foreach (SkillIssue issue in _validation.Issues)
+        {
+            _issues.Add(new ValidationItem(issue));
+        }
+
+        ValidationHeader.Visibility = _validation.Applies ? Visibility.Visible : Visibility.Collapsed;
+        ValidationList.Visibility = _validation.Applies && _issues.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        ValidationOkRow.Visibility = _validation.Applies && _issues.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        var counts = new List<string>();
+        if (_validation.ErrorCount > 0)
+        {
+            counts.Add($"{_validation.ErrorCount} error" + (_validation.ErrorCount == 1 ? string.Empty : "s"));
+        }
+        if (_validation.WarningCount > 0)
+        {
+            counts.Add($"{_validation.WarningCount} warning" + (_validation.WarningCount == 1 ? string.Empty : "s"));
+        }
+        if (_validation.SuggestionCount > 0)
+        {
+            counts.Add($"{_validation.SuggestionCount} note" + (_validation.SuggestionCount == 1 ? string.Empty : "s"));
+        }
+
+        // The sidebar is narrow: the header carries the worst severity only, and the
+        // full tally goes in the tooltip.
+        ValidationHeader.Text = counts.Count > 0 ? "FRONT MATTER · " + counts[0] : "FRONT MATTER";
+        ToolTipService.SetToolTip(
+            ValidationHeader,
+            counts.Count > 0 ? string.Join(" · ", counts) : "Front matter checks out");
+    }
+
+    /// <summary>Clicking an issue parks the caret on the line it is about.</summary>
+    private void OnValidationIssueClick(object sender, ItemClickEventArgs e)
+    {
+        if (e.ClickedItem is not ValidationItem item)
+        {
+            return;
+        }
+
+        int offset = OffsetOfLine(Editor.Text, Math.Max(0, item.Issue.Line));
+        int end = Editor.Text.IndexOfAny(new[] { '\r', '\n' }, offset);
+        Editor.Focus(FocusState.Programmatic);
+        Editor.Select(offset, (end < 0 ? Editor.Text.Length : end) - offset);
     }
 
     /// <summary>Fill the status-bar flyout with the per-tier and per-file breakdown.</summary>
@@ -432,9 +737,27 @@ public sealed partial class MainPage : Page
             });
         }
 
+        // Once the body is past the warning line, the meter should offer the edit that
+        // fixes it rather than only reporting the number.
+        if (_budget.HasFrontMatter && _budget.InvokeTokens >= Settings.Current.Skills.BudgetWarnTokens)
+        {
+            var extract = new Button
+            {
+                Content = "Extract a section to a reference…",
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                Margin = new Thickness(0, 12, 0, 0),
+            };
+            extract.Click += async (_, _) =>
+            {
+                BudgetButton.Flyout.Hide();
+                await ExtractReferenceAsync();
+            };
+            BudgetPanel.Children.Add(extract);
+        }
+
         BudgetPanel.Children.Add(new TextBlock
         {
-            Text = "Estimates assume ~4 characters per token.",
+            Text = $"Estimates assume ~{Settings.Current.Skills.CharsPerToken:0.#} characters per token.",
             FontSize = 11,
             Margin = new Thickness(0, 10, 0, 0),
             TextWrapping = TextWrapping.Wrap,
@@ -524,6 +847,58 @@ public sealed partial class MainPage : Page
         Editor.Select(offset, 0);
     }
 
+    /// <summary>
+    /// Follow a <c>#section</c> link: scroll the preview to the heading it names and park
+    /// the caret on the same line. Matching is by GitHub's slug, since that is the scheme
+    /// the link was written against; an explicit HTML <c>id</c> is honoured too.
+    /// </summary>
+    /// <param name="deferred">
+    /// True when the document has only just been rendered — the heading has no layout yet,
+    /// so bringing it into view has to wait for the next pass.
+    /// </param>
+    private void NavigateToAnchor(string anchor, bool deferred = false)
+    {
+        if (string.IsNullOrWhiteSpace(anchor))
+        {
+            return;
+        }
+
+        string slug = anchor.TrimStart('#');
+        OutlineEntry? target =
+            _headings.FirstOrDefault(h => string.Equals(h.Anchor, slug, StringComparison.OrdinalIgnoreCase))
+            // A link written against the heading text rather than its slug still lands.
+            ?? _headings.FirstOrDefault(h => string.Equals(
+                MarkdownRenderer.Slugify(h.Text), MarkdownRenderer.Slugify(slug), StringComparison.OrdinalIgnoreCase));
+
+        if (target is null)
+        {
+            StatusText.Text = $"No heading matches #{slug}";
+            return;
+        }
+
+        if (deferred)
+        {
+            DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => ScrollTo(target));
+            return;
+        }
+        ScrollTo(target);
+    }
+
+    private void ScrollTo(OutlineEntry entry)
+    {
+        if (PreviewScroller.Visibility == Visibility.Visible)
+        {
+            entry.Element.StartBringIntoView(new BringIntoViewOptions
+            {
+                VerticalAlignmentRatio = 0,
+                AnimationDesired = true,
+            });
+        }
+
+        int offset = OffsetOfLine(Editor.Text, entry.Line);
+        Editor.Select(offset, 0);
+    }
+
     private void OnToggleOutline(object sender, RoutedEventArgs e) => SetOutlineVisible(OutlineMenuItem.IsChecked);
 
     private void ToggleOutline() => SetOutlineVisible(!OutlineMenuItem.IsChecked);
@@ -533,6 +908,7 @@ public sealed partial class MainPage : Page
         OutlineMenuItem.IsChecked = visible;
         Sidebar.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
         SidebarColumn.Width = visible ? new GridLength(248) : new GridLength(0);
+        MarkSessionDirty();
     }
 
     /// <summary>Character offset of a zero-based line, tolerating \r, \n and \r\n breaks.</summary>
@@ -736,37 +1112,49 @@ public sealed partial class MainPage : Page
 
     private void OnPreviewMode(object sender, RoutedEventArgs e) => SetViewMode(ViewMode.Preview);
 
-    private enum ViewMode { Edit, Split, Preview }
+    private void OnAgentMode(object sender, RoutedEventArgs e) => SetViewMode(ViewMode.Agent);
+
+    private enum ViewMode { Edit, Split, Preview, Agent }
 
     private void SetViewMode(ViewMode mode)
     {
+        _mode = mode;
+
         EditModeButton.IsChecked = mode == ViewMode.Edit;
         SplitModeButton.IsChecked = mode == ViewMode.Split;
         PreviewModeButton.IsChecked = mode == ViewMode.Preview;
+        AgentModeButton.IsChecked = mode == ViewMode.Agent;
 
         EditModeMenuItem.IsChecked = mode == ViewMode.Edit;
         SplitModeMenuItem.IsChecked = mode == ViewMode.Split;
         PreviewModeMenuItem.IsChecked = mode == ViewMode.Preview;
+        AgentModeMenuItem.IsChecked = mode == ViewMode.Agent;
 
-        Editor.Visibility = mode == ViewMode.Preview ? Visibility.Collapsed : Visibility.Visible;
-        PreviewScroller.Visibility = mode == ViewMode.Edit ? Visibility.Collapsed : Visibility.Visible;
+        // Agent view takes the whole card: it is a reading of the document, not a pane of it.
+        bool agent = mode == ViewMode.Agent;
+        AgentScroller.Visibility = agent ? Visibility.Visible : Visibility.Collapsed;
+
+        EditorHost.Visibility = agent || mode == ViewMode.Preview ? Visibility.Collapsed : Visibility.Visible;
+        PreviewScroller.Visibility = agent || mode == ViewMode.Edit ? Visibility.Collapsed : Visibility.Visible;
         Splitter.Visibility = mode == ViewMode.Split ? Visibility.Visible : Visibility.Collapsed;
-        FormatBar.Visibility = mode == ViewMode.Preview ? Visibility.Collapsed : Visibility.Visible;
+        FormatBar.Visibility = agent || mode == ViewMode.Preview ? Visibility.Collapsed : Visibility.Visible;
 
         double editorStars = EditorColumn.Width.Value <= 0 ? 1 : EditorColumn.Width.Value;
         double previewStars = PreviewColumn.Width.Value <= 0 ? 1 : PreviewColumn.Width.Value;
 
-        EditorColumn.Width = mode == ViewMode.Preview
+        EditorColumn.Width = mode is ViewMode.Preview
             ? new GridLength(0)
             : new GridLength(editorStars, GridUnitType.Star);
-        PreviewColumn.Width = mode == ViewMode.Edit
+        PreviewColumn.Width = mode is ViewMode.Edit
             ? new GridLength(0)
             : new GridLength(previewStars, GridUnitType.Star);
 
-        if (mode == ViewMode.Preview)
+        if (mode is ViewMode.Preview or ViewMode.Agent)
         {
             RenderPreview();
         }
+
+        MarkSessionDirty();
     }
 
     // ---- Draggable splitter ---------------------------------------------------
@@ -858,8 +1246,11 @@ public sealed partial class MainPage : Page
         await OpenPathAsync(file.Path);
     }
 
-    /// <summary>Open <paramref name="path"/> in a tab, reusing one if it is already open.</summary>
-    private async Task OpenPathAsync(string path)
+    /// <summary>
+    /// Open <paramref name="path"/> in a tab, reusing one if it is already open.
+    /// </summary>
+    /// <param name="anchor">Heading to land on, from a link like <c>./rules.md#naming</c>.</param>
+    private async Task OpenPathAsync(string path, string? anchor = null)
     {
         // Already open? Just bring that tab forward.
         MdDocument? existing = _documents.FirstOrDefault(
@@ -868,6 +1259,10 @@ public sealed partial class MainPage : Page
         {
             SelectDocument(existing);
             SetViewMode(ViewMode.Preview);
+            if (anchor is not null)
+            {
+                NavigateToAnchor(anchor, deferred: true);
+            }
             return;
         }
 
@@ -887,6 +1282,13 @@ public sealed partial class MainPage : Page
 
             // Opening a file is a reading gesture: land in preview.
             SetViewMode(ViewMode.Preview);
+            MarkSessionDirty();
+            RefreshWatchers();
+
+            if (anchor is not null)
+            {
+                NavigateToAnchor(anchor, deferred: true);
+            }
         }
         catch (Exception ex)
         {
@@ -913,9 +1315,9 @@ public sealed partial class MainPage : Page
 
         try
         {
-            string text = Editor.Text;
+            string text = PrepareForSave();
             await File.WriteAllTextAsync(_current.Path, text);
-            MarkSaved(text);
+            MarkSaved(Editor.Text);
             return true;
         }
         catch (Exception ex)
@@ -942,10 +1344,11 @@ public sealed partial class MainPage : Page
 
         try
         {
-            string text = Editor.Text;
+            string text = PrepareForSave();
             await File.WriteAllTextAsync(file.Path, text);
             _current.Path = file.Path;
-            MarkSaved(text);
+            MarkSaved(Editor.Text);
+            RefreshWatchers();
             return true;
         }
         catch (Exception ex)
@@ -961,6 +1364,7 @@ public sealed partial class MainPage : Page
         _current.SavedText = Normalize(text);
         _current.IsDirty = false;
         UpdateTitle();
+        MarkSessionDirty();
     }
 
     /// <summary>Returns true if it is safe to discard <paramref name="document"/>.</summary>
